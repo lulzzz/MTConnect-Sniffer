@@ -10,6 +10,7 @@ using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace TrakHound.MTConnectSniffer
 {
@@ -47,8 +48,9 @@ namespace TrakHound.MTConnectSniffer
         public event RequestStatusHandler RequestsCompleted;
 
         private Stopwatch stopwatch;
-
+        private ManualResetEvent stop;
         private object _lock = new object();
+        private List<Ping> pingRequests = new List<Ping>();
 
         int sentPingRequests = 0;
         int receivedPingRequests = 0;
@@ -79,6 +81,8 @@ namespace TrakHound.MTConnectSniffer
         /// </summary>
         public void Start()
         {
+            stop = new ManualResetEvent(false);
+
             stopwatch = new Stopwatch();
             stopwatch.Start();
 
@@ -86,7 +90,15 @@ namespace TrakHound.MTConnectSniffer
             foreach (var address in addresses)
             {
                 SendPingRequest(address);
+                if (stop.WaitOne(0, true)) break;
             }
+        }
+
+        public void Stop()
+        {
+            if (stop != null) stop.Set();
+
+            foreach (var ping in pingRequests) ping.SendAsyncCancel();
         }
 
         private void CheckRequestsStatus()
@@ -187,10 +199,15 @@ namespace TrakHound.MTConnectSniffer
 
         private void SendPingRequest(IPAddress address)
         {
-            var p = new Ping();
-            p.PingCompleted += PingCompleted;
-            sentPingRequests++;
-            p.SendAsync(address, address);
+            try
+            {
+                var p = new Ping();
+                p.PingCompleted += PingCompleted;
+                pingRequests.Add(p);
+                sentPingRequests++;
+                p.SendAsync(address, address);
+            }
+            catch { }
         }
 
         private void PingCompleted(object sender, PingCompletedEventArgs e)
@@ -202,14 +219,19 @@ namespace TrakHound.MTConnectSniffer
                 CheckRequestsStatus();
             }
 
-            var ip = e.UserState as IPAddress;
-            if (ip != null && e.Reply.Status == IPStatus.Success)
+            if (e != null)
             {
-                foreach (int port in PortRange)
+                var ip = e.UserState as IPAddress;
+                if (ip != null && e.Reply != null && e.Reply.Status == IPStatus.Success)
                 {
-                    if (TestPort(ip, port))
+                    foreach (int port in PortRange)
                     {
-                        SendProbe(ip, port);
+                        if (stop.WaitOne(0, true)) break;
+
+                        if (TestPort(ip, port))
+                        {
+                            SendProbe(ip, port);
+                        }
                     }
                 }
             }
@@ -234,15 +256,19 @@ namespace TrakHound.MTConnectSniffer
 
         private void SendProbe(IPAddress address, int port)
         {
-            var uri = new UriBuilder("http", address.ToString(), port);
+            try
+            {
+                var uri = new UriBuilder("http", address.ToString(), port);
 
-            var probe = new MTConnect.Clients.Probe(uri.ToString());
-            probe.UserObject = new ProbeSender(address, port);
-            probe.Successful += Probe_Successful;
-            probe.Error += Probe_Error;
-            probe.ConnectionError += Probe_ConnectionError;
-            sentProbeRequests++;
-            probe.ExecuteAsync();          
+                var probe = new MTConnect.Clients.Probe(uri.ToString());
+                probe.UserObject = new ProbeSender(address, port);
+                probe.Successful += Probe_Successful;
+                probe.Error += Probe_Error;
+                probe.ConnectionError += Probe_ConnectionError;
+                sentProbeRequests++;
+                probe.ExecuteAsync();
+            }
+            catch { }      
         }
 
         private void Probe_ConnectionError(Exception ex) { IncrementProbeRequests(); }
@@ -253,7 +279,7 @@ namespace TrakHound.MTConnectSniffer
         {
             IncrementProbeRequests();
 
-            if (document.UserObject != null)
+            if (document != null && document.UserObject != null)
             {
                 var sender = document.UserObject as ProbeSender;
                 if (sender != null)
