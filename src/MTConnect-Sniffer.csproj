@@ -31,8 +31,8 @@
     <WarningLevel>4</WarningLevel>
   </PropertyGroup>
   <ItemGroup>
-    <Reference Include="MTConnect-NET, Version=2.0.1.7322, Culture=neutral, processorArchitecture=MSIL">
-      <HintPath>packages\MTConnect.NET.2.0.1.7322\lib\net40\MTConnect-NET.dll</HintPath>
+    <Reference Include="MTConnect-NET, Version=2.1.0.15682, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>packages\MTConnect.NET.2.1.0.15682\lib\net40\MTConnect-NET.dll</HintPath>
       <Private>True</Private>
     </Reference>
     <Reference Include="RestSharp, Version=105.2.3.0, Culture=neutral, processorArchitecture=MSIL">
