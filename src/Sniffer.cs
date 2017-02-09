@@ -28,6 +28,11 @@ namespace TrakHound.MTConnectSniffer
         public int Timeout { get; set; }
 
         /// <summary>
+        /// The delay in milliseconds between ping requests
+        /// </summary>
+        public int SubsequentPingDelay { get; set; }
+
+        /// <summary>
         /// The range of ports to scan for MTConnect Agents at
         /// </summary>
         public int[] PortRange { get; set; }
@@ -61,6 +66,7 @@ namespace TrakHound.MTConnectSniffer
         public Sniffer()
         {
             Timeout = 500;
+            SubsequentPingDelay = 25;
 
             // Initialize Ranges
             InitializePortRange();
@@ -90,7 +96,7 @@ namespace TrakHound.MTConnectSniffer
             foreach (var address in addresses)
             {
                 SendPingRequest(address);
-                if (stop.WaitOne(0, true)) break;
+                if (stop.WaitOne(SubsequentPingDelay, true)) break;
             }
         }
 
