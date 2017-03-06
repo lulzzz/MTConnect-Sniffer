@@ -21,6 +21,10 @@ namespace TrakHound.MTConnectSniffer
     {
         public delegate void DeviceHandler(MTConnectDevice device);
         public delegate void RequestStatusHandler(long milliseconds);
+        public delegate void PingSentHandler(IPAddress address);
+        public delegate void PingReceivedHandler(IPAddress address, PingReply reply);
+        public delegate void PortRequestHandler(IPAddress address, int port);
+        public delegate void ProbeRequestHandler(IPAddress address, int port);
 
         /// <summary>
         /// The timeout used for requests
@@ -51,6 +55,15 @@ namespace TrakHound.MTConnectSniffer
         /// Event raised when all requests have completed whether successful or not
         /// </summary>
         public event RequestStatusHandler RequestsCompleted;
+
+        public event PingSentHandler PingSent;
+        public event PingReceivedHandler PingReceived;
+        public event PortRequestHandler PortOpened;
+        public event PortRequestHandler PortClosed;
+        public event ProbeRequestHandler ProbeSent;
+        public event ProbeRequestHandler ProbeSuccessful;
+        public event ProbeRequestHandler ProbeError;
+
 
         private Stopwatch stopwatch;
         private ManualResetEvent stop;
@@ -135,7 +148,7 @@ namespace TrakHound.MTConnectSniffer
 
                 foreach (var ni in interfaces)
                 {
-                    if (ni.OperationalStatus == OperationalStatus.Up && ni.NetworkInterfaceType == NetworkInterfaceType.Wireless80211 || ni.NetworkInterfaceType == NetworkInterfaceType.Ethernet)
+                    if (ni.OperationalStatus == OperationalStatus.Up && (ni.NetworkInterfaceType == NetworkInterfaceType.Wireless80211 || ni.NetworkInterfaceType == NetworkInterfaceType.Ethernet))
                     {
                         foreach (var ip in ni.GetIPProperties().UnicastAddresses)
                         {
@@ -187,7 +200,12 @@ namespace TrakHound.MTConnectSniffer
                     var success = result.AsyncWaitHandle.WaitOne(Timeout);
                     if (!success)
                     {
+                        PortClosed?.Invoke(address, port);
                         return false;
+                    }
+                    else
+                    {
+                        PortOpened?.Invoke(address, port);
                     }
 
                     client.EndConnect(result);
@@ -211,6 +229,7 @@ namespace TrakHound.MTConnectSniffer
                 p.PingCompleted += PingCompleted;
                 pingRequests.Add(p);
                 sentPingRequests++;
+                PingSent?.Invoke(address);
                 p.SendAsync(address, address);
             }
             catch { }
@@ -228,6 +247,9 @@ namespace TrakHound.MTConnectSniffer
             if (e != null)
             {
                 var ip = e.UserState as IPAddress;
+
+                PingReceived?.Invoke(ip, e.Reply);
+
                 if (ip != null && e.Reply != null && e.Reply.Status == IPStatus.Success)
                 {
                     foreach (int port in PortRange)
@@ -272,14 +294,30 @@ namespace TrakHound.MTConnectSniffer
                 probe.Error += Probe_Error;
                 probe.ConnectionError += Probe_ConnectionError;
                 sentProbeRequests++;
+                ProbeSent?.Invoke(address, port);
                 probe.ExecuteAsync();
             }
             catch { }      
         }
 
-        private void Probe_ConnectionError(Exception ex) { IncrementProbeRequests(); }
+        private void Probe_ConnectionError(Exception ex)
+        {
+            IncrementProbeRequests();
+        }
 
-        private void Probe_Error(MTConnect.MTConnectError.Document errorDocument) { IncrementProbeRequests(); }
+        private void Probe_Error(MTConnect.MTConnectError.Document errorDocument)
+        {
+            IncrementProbeRequests();
+
+            if (errorDocument != null)
+            {
+                var sender = errorDocument.UserObject as ProbeSender;
+                if (sender != null)
+                {
+                    ProbeError?.Invoke(sender.Address, sender.Port);
+                }
+            }
+        }
 
         private void Probe_Successful(MTConnect.MTConnectDevices.Document document)
         {
@@ -297,6 +335,8 @@ namespace TrakHound.MTConnectSniffer
                     {
                         DeviceFound?.Invoke(new MTConnectDevice(sender.Address, sender.Port, macAddress, device.Name));
                     }
+
+                    ProbeSuccessful?.Invoke(sender.Address, sender.Port);
                 }
             }
         }
