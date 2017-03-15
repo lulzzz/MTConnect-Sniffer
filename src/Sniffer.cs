@@ -70,8 +70,8 @@ namespace TrakHound.MTConnectSniffer
         private object _lock = new object();
         private PingQueue pingQueue;
 
-        private int sentProbeRequests = 0;
-        private int receivedProbeRequests = 0;
+        private int sentPortRequests = 0;
+        private int receivedPortRequests = 0;
 
         public Sniffer()
         {
@@ -102,6 +102,20 @@ namespace TrakHound.MTConnectSniffer
             stopwatch = new Stopwatch();
             stopwatch.Start();
 
+            PingQueue_Start();
+        }
+
+        public void Stop()
+        {
+            if (stop != null) stop.Set();
+
+            if (pingQueue != null) pingQueue.Stop();
+        }
+
+        #region "PingQueue"
+
+        private void PingQueue_Start()
+        {
             pingQueue = new PingQueue();
             pingQueue.Add(AddressRange.ToList());
             pingQueue.Completed += Queue_Completed;
@@ -122,7 +136,16 @@ namespace TrakHound.MTConnectSniffer
 
         private void Queue_Completed(List<IPAddress> successfulAddresses)
         {
-            foreach (var address in successfulAddresses)
+            if (successfulAddresses.Count > 0) RunProbeRequests(successfulAddresses);
+            else CheckRequestsStatus();
+        }
+
+        #endregion
+
+
+        private void RunProbeRequests(List<IPAddress> addresses)
+        {
+            foreach (var address in addresses)
             {
                 if (stop.WaitOne(0, true)) break;
 
@@ -130,9 +153,14 @@ namespace TrakHound.MTConnectSniffer
                 {
                     ThreadPool.QueueUserWorkItem(new WaitCallback((o) =>
                     {
-                        if (TestPort(address, port))
+                        lock(_lock) sentPortRequests++;
+
+                        if (TestPort(address, port)) SendProbe(address, port);
+
+                        lock(_lock)
                         {
-                            SendProbe(address, port);
+                            receivedPortRequests++;
+                            CheckRequestsStatus();
                         }
                     }));
 
@@ -141,16 +169,9 @@ namespace TrakHound.MTConnectSniffer
             }
         }
 
-        public void Stop()
-        {
-            if (stop != null) stop.Set();
-
-            if (pingQueue != null) pingQueue.Stop();
-        }
-
         private void CheckRequestsStatus()
         {
-            if (receivedProbeRequests >= sentProbeRequests)
+            if (receivedPortRequests >= sentPortRequests)
             {
                 long m = 0;
 
@@ -163,6 +184,80 @@ namespace TrakHound.MTConnectSniffer
                 RequestsCompleted?.Invoke(m);
             }
         }
+
+        private bool TestPort(IPAddress address, int port)
+        {
+            try
+            {
+                using (var client = new TcpClient())
+                {
+                    var result = client.BeginConnect(address, port, null, null);
+                    var success = result.AsyncWaitHandle.WaitOne(Timeout);
+                    if (!success)
+                    {
+                        PortClosed?.Invoke(address, port);
+                        return false;
+                    }
+                    else
+                    {
+                        PortOpened?.Invoke(address, port);
+                    }
+
+                    client.EndConnect(result);
+                }
+            }
+            catch
+            {
+                return false;
+            }
+            return true;
+        }
+
+        private void SendProbe(IPAddress address, int port)
+        {
+            try
+            {
+                var uri = new UriBuilder("http", address.ToString(), port);
+
+                var probe = new MTConnect.Clients.Probe(uri.ToString());
+                probe.UserObject = new ProbeSender(address, port);
+                probe.Timeout = Timeout;
+                probe.Error += Probe_Error;
+
+                // Notify that a new Probe request has been sent
+                ProbeSent?.Invoke(address, port);
+
+                var document = probe.Execute();
+                if (document != null)
+                {
+                    // Get the MAC Address of the sender
+                    var macAddress = GetMacAddress(address);
+
+                    foreach (var device in document.Devices)
+                    {
+                        // Notify that a Device was found
+                        DeviceFound?.Invoke(new MTConnectDevice(address, port, macAddress, device.Name));
+                    }
+
+                    // Notify that the Probe reqeuest was successful
+                    ProbeSuccessful?.Invoke(address, port);
+                }
+            }
+            catch { }
+        }
+
+        private void Probe_Error(MTConnect.MTConnectError.Document errorDocument)
+        {
+            if (errorDocument != null)
+            {
+                var sender = errorDocument.UserObject as ProbeSender;
+                if (sender != null)
+                {
+                    ProbeError?.Invoke(sender.Address, sender.Port);
+                }
+            }
+        }
+
 
         /// <summary>
         /// Get an array of Host Addresses for each Network Interface
@@ -218,120 +313,6 @@ namespace TrakHound.MTConnectSniffer
             return l.ToArray();
         }
 
-        private bool TestPort(IPAddress address, int port)
-        {
-            try
-            {
-                using (var client = new TcpClient())
-                {
-                    var result = client.BeginConnect(address, port, null, null);
-                    var success = result.AsyncWaitHandle.WaitOne(Timeout);
-                    if (!success)
-                    {
-                        PortClosed?.Invoke(address, port);
-                        return false;
-                    }
-                    else
-                    {
-                        PortOpened?.Invoke(address, port);
-                    }
-
-                    client.EndConnect(result);
-                }
-            }
-            catch
-            {
-                return false;
-            }
-            return true;
-        }
-        
-
-        #region "MTConnect Probe"
-
-        private class ProbeSender
-        {
-            public ProbeSender(IPAddress address, int port)
-            {
-                Address = address;
-                Port = port;
-            }
-
-            public IPAddress Address { get; set; }
-            public int Port { get; set; }
-        }
-
-
-        private void SendProbe(IPAddress address, int port)
-        {
-            try
-            {
-                var uri = new UriBuilder("http", address.ToString(), port);
-
-                var probe = new MTConnect.Clients.Probe(uri.ToString());
-                probe.UserObject = new ProbeSender(address, port);
-                probe.Successful += Probe_Successful;
-                probe.Error += Probe_Error;
-                probe.ConnectionError += Probe_ConnectionError;
-                sentProbeRequests++;
-                ProbeSent?.Invoke(address, port);
-                probe.ExecuteAsync();
-            }
-            catch { }      
-        }
-
-        private void Probe_ConnectionError(Exception ex)
-        {
-            IncrementProbeRequests();
-        }
-
-        private void Probe_Error(MTConnect.MTConnectError.Document errorDocument)
-        {
-            IncrementProbeRequests();
-
-            if (errorDocument != null)
-            {
-                var sender = errorDocument.UserObject as ProbeSender;
-                if (sender != null)
-                {
-                    ProbeError?.Invoke(sender.Address, sender.Port);
-                }
-            }
-        }
-
-        private void Probe_Successful(MTConnect.MTConnectDevices.Document document)
-        {
-            IncrementProbeRequests();
-
-            if (document != null && document.UserObject != null)
-            {
-                var sender = document.UserObject as ProbeSender;
-                if (sender != null)
-                {
-                    // Get the MAC Address of the sender
-                    var macAddress = GetMacAddress(sender.Address);
-
-                    foreach (var device in document.Devices)
-                    {
-                        DeviceFound?.Invoke(new MTConnectDevice(sender.Address, sender.Port, macAddress, device.Name));
-                    }
-
-                    ProbeSuccessful?.Invoke(sender.Address, sender.Port);
-                }
-            }
-        }
-
-        private void IncrementProbeRequests()
-        {
-            lock (_lock)
-            {
-                receivedProbeRequests++;
-                CheckRequestsStatus();
-            }
-        }
-
-        #endregion
-
         #region "MAC Address"
 
         [DllImport("iphlpapi.dll", ExactSpelling = true)]
@@ -356,5 +337,18 @@ namespace TrakHound.MTConnectSniffer
         }
 
         #endregion
+
+
+        private class ProbeSender
+        {
+            public ProbeSender(IPAddress address, int port)
+            {
+                Address = address;
+                Port = port;
+            }
+
+            public IPAddress Address { get; set; }
+            public int Port { get; set; }
+        }
     }
 }
