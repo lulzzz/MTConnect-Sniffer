@@ -6,6 +6,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
@@ -64,17 +65,13 @@ namespace TrakHound.MTConnectSniffer
         public event ProbeRequestHandler ProbeSuccessful;
         public event ProbeRequestHandler ProbeError;
 
-
         private Stopwatch stopwatch;
         private ManualResetEvent stop;
         private object _lock = new object();
-        private List<Ping> pingRequests = new List<Ping>();
+        private PingQueue pingQueue;
 
-        int sentPingRequests = 0;
-        int receivedPingRequests = 0;
-
-        int sentProbeRequests = 0;
-        int receivedProbeRequests = 0;
+        private int sentProbeRequests = 0;
+        private int receivedProbeRequests = 0;
 
         public Sniffer()
         {
@@ -105,11 +102,42 @@ namespace TrakHound.MTConnectSniffer
             stopwatch = new Stopwatch();
             stopwatch.Start();
 
-            var addresses = AddressRange;
-            foreach (var address in addresses)
+            pingQueue = new PingQueue();
+            pingQueue.Add(AddressRange.ToList());
+            pingQueue.Completed += Queue_Completed;
+            pingQueue.PingSent += PingQueue_PingSent;
+            pingQueue.PingReceived += Queue_PingReceived;
+            pingQueue.Start();
+        }
+
+        private void PingQueue_PingSent(IPAddress address)
+        {
+            PingSent?.Invoke(address);
+        }
+
+        private void Queue_PingReceived(IPAddress address, PingReply reply)
+        {
+            PingReceived?.Invoke(address, reply);
+        }
+
+        private void Queue_Completed(List<IPAddress> successfulAddresses)
+        {
+            foreach (var address in successfulAddresses)
             {
-                SendPingRequest(address);
-                if (stop.WaitOne(SubsequentPingDelay, true)) break;
+                if (stop.WaitOne(0, true)) break;
+
+                foreach (int port in PortRange)
+                {
+                    ThreadPool.QueueUserWorkItem(new WaitCallback((o) =>
+                    {
+                        if (TestPort(address, port))
+                        {
+                            SendProbe(address, port);
+                        }
+                    }));
+
+                    if (stop.WaitOne(0, true)) break;
+                }
             }
         }
 
@@ -117,12 +145,12 @@ namespace TrakHound.MTConnectSniffer
         {
             if (stop != null) stop.Set();
 
-            foreach (var ping in pingRequests) ping.SendAsyncCancel();
+            if (pingQueue != null) pingQueue.Stop();
         }
 
         private void CheckRequestsStatus()
         {
-            if (receivedPingRequests >= sentPingRequests && receivedProbeRequests >= sentProbeRequests)
+            if (receivedProbeRequests >= sentProbeRequests)
             {
                 long m = 0;
 
@@ -217,55 +245,7 @@ namespace TrakHound.MTConnectSniffer
             }
             return true;
         }
-
-
-        #region "Ping"
-
-        private void SendPingRequest(IPAddress address)
-        {
-            try
-            {
-                var p = new Ping();
-                p.PingCompleted += PingCompleted;
-                pingRequests.Add(p);
-                sentPingRequests++;
-                PingSent?.Invoke(address);
-                p.SendAsync(address, address);
-            }
-            catch { }
-        }
-
-        private void PingCompleted(object sender, PingCompletedEventArgs e)
-        {
-            // Set flag to know when all sent Ping requests have been received
-            lock (_lock)
-            {
-                receivedPingRequests++;
-                CheckRequestsStatus();
-            }
-
-            if (e != null)
-            {
-                var ip = e.UserState as IPAddress;
-
-                PingReceived?.Invoke(ip, e.Reply);
-
-                if (ip != null && e.Reply != null && e.Reply.Status == IPStatus.Success)
-                {
-                    foreach (int port in PortRange)
-                    {
-                        if (stop.WaitOne(0, true)) break;
-
-                        if (TestPort(ip, port))
-                        {
-                            SendProbe(ip, port);
-                        }
-                    }
-                }
-            }
-        }
-
-        #endregion
+        
 
         #region "MTConnect Probe"
 
